@@ -1,0 +1,948 @@
+-- MP2_parser.rig   Automated model generator MP2 -> C++
+-- v 2.0
+-- Mikhail Auguston, 03/05/15
+-- last modified 04/05/15
+--
+-- use: parser schema_name output_file scope
+--
+-- takes the source .mp file and creates the intermediate tree
+-- 
+--------------------------------------------------------------
+#MP
+-- ********   Globals:
+-- $scope	-- scope for the model
+-- $main_schema_name  -- from the MP model, used to generate container names
+-- $input_schema_name	-- from the parameters, should be the same
+-- $triggering_events: <* event_name: T *>	
+--		events triggering WHEN, should not appear 
+--		in patterns, but may be shared or coordinated
+--
+-- $atomic_events: <* event_name: T *> -- for generating event list in C++
+-- $already_ordered: <* event_name: T *>  -- for #order_composites_by_dependency
+-- $composite_order: (. (* event_name *) .)	-- retains the composite definition order 
+--											for generating harvest() calls
+-- $this	contains root, composite event or schema name 
+--			for COORDINATE FROM default, reset in #rule
+-- $source_list: <* variable_name: pattern *> -- variables 
+--					defined in nested compositions COORDINATE, ENSURE, NEW
+--					and maintained within schema or BUILD block
+-------------------------------------------
+-- these tables are produced by the 1st pass
+-------------------------------------------
+-- $composites: <* composite_event_name: <. rule_type:	  composite,
+--											work_name:	  work_name,
+--											pattern_list: $pattern_list,
+--											build_block:  $comp_op_list  .>
+--				*> -- composites table
+-- $roots:		<* root_name: <. rule_type:		ROOT,
+--								 work_name:		work_name,
+--								 pattern_list: $pattern_list,
+--								 build_block:  $comp_op_list  .> 
+--				*>		-- roots table
+--
+-- $coordinate_ops: <* work_name: <. operation:			COORDINATE,
+--									 work:				work_name,
+--									 synchronization:	$synchronization,
+--									 source_list:		$coord,
+--									 body:				$body .>  *>  
+-- $share_all_ops:  <* work_name: <. operation:		SHARE_ALL,
+--									 work:			work_name,
+--									 host_list:		$sharing_hosts,
+--									 shared_events:	$shared_events .> *>
+-------------------------------------------
+-- 2nd pass results
+-------------------------------------------
+-- $new_composites: <* composite_event_name: <. rule_type:	  composite,
+--												work_name:	  work_name,
+--												pattern_list: $pattern_list,
+--												build_block:  $comp_op_list,
+--												called_composites: <* $composite_name: T *> .>
+--					*>			-- updated composites table
+-- $new_root_table:	<* root_name: <. rule_type:		ROOT,
+--									 work_name:		work_name,
+--									 pattern_list: $pattern_list,
+--									 build_block:  $comp_op_list,
+--									 called_composites: <* $composite_name: T *> .> 
+--					*>		-- updated roots table
+--
+-- $new_share_all_ops: <* work_name: *>
+-----------------------------------------
+-- $unique_number  -- to keep work names unique
+-- $errors_detected -- stop reporting errors if it becomes > 3
+-------------------------------------------------------------
+
+  $Parm:= #PARM(T); -- list of all parameters
+  $input_schema_name := #IMPLODE( $Parm[1] );
+  $this := $input_schema_name;
+  $input_file	:= #IMPLODE( $input_schema_name '.mp');
+  $output_file	:= #IMPLODE( $Parm[2] ); -- for generation phase
+  IF $Parm[3] ->	
+	$scope	:= $Parm[3]; -- no need to #IMPLODE(), just take the number
+  ELSIF T	  ->	
+	$scope	:= 1;		 -- default scope
+  FI;	
+  OPEN MSG ' ';	--for error messages
+
+  --call C lexer 
+  $Lex:= #CALL_PAS( 35 $input_file 'L+A-U-P-C+p-m+');
+  
+--PRINT $Lex; --<<<<<<<<<<<<<<
+  MSG<< 'MPhoenix parser v.2.0 input from'  $input_file scope $scope
+		Total #LEN($Lex) tokens;
+  	 
+  $unique_number:= 0;
+  $errors_detected:= 0;
+  	 
+  --********** 1st pass, do the parsing, $composites, $roots
+  
+  $complete:= #main_schema( $Lex);
+
+  --*********** 2nd pass, insert/expand composite events,
+  --			create $new_root_table, $new_composites
+ 
+ IF $errors_detected = 0 ->
+	$new_composites :=  #build_rules($composites); -- composites first
+	#detect_recursion($new_composites);
+	$composite_order:= #order_composites_by_dependency($new_composites);
+	$new_root_table :=	 #build_rules($roots);
+	$new_share_all_ops:= #prepare_share_all($share_all_ops);
+	
+ FI;
+
+ IF $errors_detected = 0 -> 
+		--MSG<< 'Parsing completed. Saving result in' $output_file;MSG<<;
+  		$result:=	$complete ++ 
+					-- the contents of $complete returned by #main_schema
+					-- <.	schema:			$id_schema,
+					--		include_list:	$include_list,
+					--		elt_list:		$elt_list	-- roots, composition ops
+					-- .>
+					
+					<. scope:			$scope,
+					 input_file:		$input_file,
+					 roots:				$roots, -- source for comments in C++
+					 composites:		$composites, -- source for comments in C++
+					 atomic_events:		$atomic_events,
+					 new_root_table:	$new_root_table,
+					 new_composites:	$new_composites,
+					 composite_order:	$composite_order,
+					 coordinate_ops:	$coordinate_ops,
+					 share_all_ops:		$new_share_all_ops
+					.>;
+		SAVE $result $output_file;
+--PRINT $result; --<<<<<<<<<<<<<<<<<<<< 
+  ELSIF T -> 	MSG<< 'Errors detected...'
+  FI;
+  
+##
+
+#main_schema
+
+	(.	 SCHEMA ( $id_schema := #IDENT 
+						/LAST #MP $main_schema_name := $id_schema/	!
+				  $x	/#error( $x err1 ); FAIL/ 
+				)
+				  
+		/IF (LAST #MP $input_schema_name <> $id_schema) ->
+			#error( $id_schema err8 ); FAIL 
+		 FI /
+		(*	$include_list !.:= #include_clause  *)
+		(* 
+			$elt_list !.:=
+				(	#rule								! 
+					#composition_operation
+						/LAST #MP $source_list:= NULL/	)
+			( ';' ! $x /#error( $x err4 )/ )
+		 *) 
+		[ #BUILD_block ]		 
+	.)
+	/$filtered_elt_list:= #filter_elt_list($elt_list);
+	 RETURN  <.	schema:			$id_schema,
+				include_list:	$include_list,
+				elt_list:		$filtered_elt_list	-- roots, composition ops
+			.>/
+##
+
+#filter_elt_list
+-- to get rid of plain composite event declarations in schema
+-- leaving only roots and composition ops for schema's class definition
+
+	(. (* ( <. composite: $a .> ! NULL ! $res !.:= $b ) *) .)
+	/RETURN $res/
+##
+
+--------------------------------------------------------------------
+-----1st pass--- rule syntax ---------------------------------------
+--------------------------------------------------------------------
+#include_clause
+	INCLUDE ( $id_schema := #IDENT !
+			  $x /#error( $x err1 ); FAIL/ )
+	( ';' ! $x /#error( $x err4 ); FAIL/ )
+	/RETURN $id_schema/
+##
+
+#rule
+-- globals:
+-- $rule_type
+-- $event_name
+
+	/$rule_type:= composite/ -- the default
+	[ ROOT /$rule_type:= ROOT/]
+	$event_name := #IDENT ':'
+	/LAST #MP $this := $event_name; -- switch default for composition FROM
+	 $defined_event := <. $rule_type: $event_name .>/
+	$patterns:= #pattern_list 
+	[ $build_block := #BUILD_block ]
+	
+	/$rule_body := <. rule_type:	$rule_type,
+					  work_name:	#IMPLODE( 'Comp_' 
+										#unique_number() '_' LAST #MP $main_schema_name),
+					  pattern_list:	$patterns,
+					  build_block:	$build_block
+				   .>;
+	 IF $rule_type = ROOT ->
+		LAST #MP $roots	++:= <. $event_name: $rule_body .>;
+	 ELSIF T ->		-- composite event definition
+		LAST #MP $composites ++:= <. $event_name: $rule_body .>;
+	 FI;
+	 LAST #MP $this := LAST #MP $input_schema_name; -- restore back
+	 RETURN $defined_event /
+##
+
+#pattern_list
+     (* $list!.:= #pattern_unit *) 
+	 /IF #LEN($list) = 1 ->
+		RETURN $list[1]
+	  ELSIF #LEN($list) = 0 ->
+		RETURN <. type: empty .>
+	  FI;
+	  RETURN <. type:	sequence,
+				name:	#IMPLODE(Sq '_'  #unique_number() 
+							'_' LAST #MP $main_schema_name),
+				body:	$list
+			.> /
+##
+
+#pattern_unit
+	-- check look-ahead token
+	V'(	$$<>';' AND $$<>')' AND $$<>'*' AND $$<>'+' AND 
+		$$<>'|' AND $$<>'}' AND $$<>',' AND $$<>']' AND 
+		$$<> BUILD AND $$<> WHEN)
+	$elt:= ( #plain !		-- event name
+			#alternative ! 
+			#iteration !  
+			#iterator_plus !
+			#set !
+			#set_iterator ! 
+			#set_iterator_plus !
+			#optional !
+			#when_clause !
+			$x /#error( $x err2 ); FAIL/
+		   )
+	/RETURN $elt/
+##
+
+#keyword
+	(WHEN ! COORDINATE ! ENSURE ! 'DO' ! 'OD' ! 'FROM') /RETURN T/
+##
+
+#plain
+		V'(NOT #keyword($$))	
+		$Id		
+		/RETURN <.	type: plain,
+					name: $Id
+				.>/
+##
+
+#alternative
+	'('		V'($$<>'*') 
+			(+  [ $probability_list !.:= #probability ]
+				$al!.:= #pattern_list				
+			+'|')
+	')'
+	/ IF #LEN($al) <= 1 ->
+		RETURN $al[1]
+	  FI;
+	  -- return unit
+	  RETURN <.	type:	alternative,
+				name:	#IMPLODE(Alt '_' #unique_number()
+							'_' LAST #MP $main_schema_name),
+							-- to avoid conflicts with INCUDED schemas
+				body:	$al,
+				probability_list: $probability_list
+			.>/
+##
+
+#probability	-- Not implemented yet <<<<<<<<<<<<<<<<<<<<<<<<
+	'<<' 
+	( $Float_number '>>' /RETURN $Float_number/		|
+	  $x					/#error( $x err7 ); FAIL/
+	)
+##
+
+#optional 
+	'[' [ $probability := #probability ] $pl:= #pattern_list ']'
+		/ -- return unit
+		 RETURN <.	type:	optional,
+					name:	#IMPLODE(Opt '_' #unique_number() 
+								'_' LAST #MP $main_schema_name),
+					body:	$pl,
+					probability: $probability 
+				.>/  	
+##
+
+#iteration
+	'(' '*' [ $scope:= #iteration_scope] $pl:= #pattern_list '*' ')'
+	/IF NOT $scope -> 
+		$scope := <. lower_bound: 0, upper_bound: LAST #MP $scope .>
+	 FI;
+	 -- return unit
+	RETURN <.	type:	iterator,
+				name:	#IMPLODE(Itr '_' #unique_number() 
+							'_' LAST #MP $main_schema_name),
+				body:	$pl,
+				iteration_scope: $scope
+		   .>/
+##
+
+#iteration_scope
+	'<'  $lower_bound:= #NUMBER [ '.' '.'  $upper_bound:= #NUMBER ] '>'
+	/IF NOT $upper_bound -> $upper_bound:= COPY($lower_bound) FI;
+	 RETURN <. lower_bound: $lower_bound, upper_bound: $upper_bound .>/
+##
+
+#iterator_plus
+	'(' '+' [$scope:= #iteration_scope] $pl:= #pattern_list '+' ')'
+		/IF NOT $scope -> 
+			$scope := <. lower_bound: 1, upper_bound: LAST #MP $scope .>
+		 FI; 
+		 -- return unit
+		 RETURN <.	type:	iterator_plus,
+					name:	#IMPLODE(Itp '_' #unique_number() 
+								'_' LAST #MP $main_schema_name),
+					body:	$pl,
+					iteration_scope: $scope
+				.>/ 
+##
+		
+#set
+	'{' V'($$<>'*')
+		(+  $al!.:= #pattern_list   + ',') '}'
+		 /
+		  -- return unit
+		  RETURN <.	type:	set,
+					name:	#IMPLODE(Set '_' #unique_number() 
+								'_' LAST #MP $main_schema_name),
+					body:	$al  -- always a list
+				.>/
+##
+
+#set_iterator
+	'{' '*'  [ $scope:= #iteration_scope] $pl:= #pattern_list  '*' '}'
+		/IF NOT $scope -> 
+			$scope := <. lower_bound: 0, upper_bound: LAST #MP $scope .>
+		 FI; 
+		 -- return unit
+		 RETURN <.	type:	set_iterator,
+					name:	#IMPLODE(SetIt '_' #unique_number() 
+								'_' LAST #MP $main_schema_name),
+					body:	$pl,
+					iteration_scope: $scope
+				.>/  
+##
+
+#set_iterator_plus
+	'{' '+' [ $scope:= #iteration_scope] $pl:= #pattern_list  '+' '}'
+		/IF NOT $scope -> 
+			$scope := <. lower_bound: 1, upper_bound: LAST #MP $scope .>
+		 FI;  
+		 -- return unit
+		 RETURN <.	type:	set_iterator_plus,
+					name:	#IMPLODE(SetItp '_' #unique_number() 
+								'_' LAST #MP $main_schema_name),
+					body:	$pl,
+					iteration_scope: $scope
+				.>/  
+##
+
+#when_clause
+	'<' '|' $pl:= #pattern_list 
+		WHEN (+ $wu_list !.:= #when_unit + ',') '|' '>'
+	/RETURN <.	type:	when_clause,
+				body:	$pl,
+				when_units: $wu_list
+			.>/  
+##
+
+#when_unit
+	[ $probability := #probability ]
+	 $event_name := #IDENT '==' '>' $pl:= #pattern_list
+	/LAST #MP $triggering_events ++:= <. $event_name: T .>;
+	 RETURN <. trigger_event:	$event_name,
+			   pattern_list:	$pl,
+			   probability:		$probability 
+			.>/  
+##
+
+------------------------------------
+----- composition operations -------
+------------------------------------
+#composition_operation
+-- globals:
+
+	($res:= #coordinate_composition
+		/LAST #MP $coordinate_ops ++:=	<. $res.work: $res .>/ !
+	 $res:= #shared_composition	
+		/LAST #MP $share_all_ops  ++:=	<. $res.work: $res .>/ !
+	 $res:= #ensure_op										!
+	 $res:= #new_event										)
+	 /RETURN <. $res.operation: $res.work .>/
+##
+
+#new_event
+	NEW /#error( $ err12 )/
+##
+
+#BUILD_block
+	BUILD /#error( $ err12 )/
+	-- add LAST #MP $variables maintenance here <<<<<<<<<<<<<<<<<<<<<<
+	'{'
+	(* $elts !.:= ( #composition_operation
+						/LAST #MP $source_list:= NULL/	!
+					#plain_attribute_declaration		!
+					#event_attribute_declaration		) 
+	* ';')
+	'}'
+			  
+##
+
+#coordinate_composition
+
+	COORDINATE 
+	/ -- maintain the $source_list stack
+	 $old_source_list:= COPY(LAST #MP $source_list)/
+	 /$synchronization:= Synchronous/
+	 ['<' '!' '>' /$synchronization:= Asynchronous/]
+	 
+	(+ $coord++:= #coordination_source 
+		/LAST #MP $source_list ++:= $coord/ +',')
+	('DO' ! $x /#error( $x err9 )/ )
+	(+  $body !.:= ( #add_relation !
+					 #coordinate_composition !
+					 #MAP_composition !
+					 #shared_composition )
+		( ';' ! $x /#error( $x err11 )/ ) 
+	+)
+	('OD' ! $x /#error( $x err10 )/ )
+	/$work:= #IMPLODE( 'Coordinate_' #unique_number() '_' LAST #MP $main_schema_name);
+	 -- restore $source_list stack
+	 LAST #MP $source_list:= $old_source_list;
+	 RETURN <.	operation:			COORDINATE,
+				work:				$work,
+				synchronization:	$synchronization,
+				source_list:		$coord,
+				body:				$body .> /
+##
+
+#coordination_source
+	( $var:= #variable ! $a /#error( $a err14 ); FAIL/)
+	( ':' ! $x /#error( $x err13 ); FAIL/ )
+	/IF LAST #MP $source_list.$var ->
+		#error( $var err19 ); FAIL
+	FI/
+
+	$pattern:= #selection_pattern
+	[ 'FROM' $from:= ( 'this' ! 
+					   $v:= #variable 
+					   /IF	NOT LAST #MP $source_list.$v ->
+								#error( $v err17 ); FAIL
+						FI/ !
+						#root_name 
+					 )]
+	-- the default for FROM is 'this'
+	/IF NOT $from OR $from = this -> 
+		$from:= <. comp: COPY(LAST #MP $this) .>
+	 ELSIF NOT #TREE($from) ->
+		$from:= <. var: $v .>
+	 FI;
+	 RETURN <.	$var: <. selection_pattern:	$pattern,
+						 from:				$from	.> 
+			.>/
+##
+
+#variable
+	$a 
+	/$b:= #EXPLODE($a);
+	 IF $b[1] <> '$' -> FAIL FI;
+	 $b[1]:= NULL;
+	 RETURN #IMPLODE($b '_variable')/
+##
+
+#selection_pattern
+	$plist!.:= $Id /RETURN $plist/;;
+	
+	'(' (+ $plist!.:= $Id + '|') ')' /RETURN $plist/
+##
+
+#root_name
+	V'(NOT #keyword($$)) 
+	$Id
+	/IF LAST #MP $roots.$Id OR 
+		( LAST #rule $event_name = $Id AND LAST #rule $rule_type = ROOT) OR
+		$Id = LAST #MP $input_schema_name ->
+		RETURN <. comp: $Id .>
+	ELSIF T ->
+		#error( $Id err15 );
+		FAIL
+	FI/
+##
+
+#add_relation
+	ADD 
+	(+  $v1:= #variable
+		/IF NOT LAST #MP $source_list.$v1 ->
+			#error( $v1 err17 ); FAIL
+		 FI;/
+		$relation:= ( 'IN' ! PRECEDES ! CONTAINS ! FOLLOWS ! $x /#error( $x err16 ); FAIL/)
+		$v2:= #variable
+		/IF NOT LAST #MP $source_list.$v2 ->
+			#error( $v2 err17 ); FAIL
+		 FI;
+		 $res!.:= <. first:		$v1,
+					 second:	$v2,
+					 relation:	$relation .>/
+	+ ',')
+	/RETURN <. operation:		ADD,
+			   relation_list:	$res .>/
+##
+
+#MAP_composition 
+	MAP /#error( $ err12 ); FAIL/
+##
+
+#shared_composition
+
+	(+ 
+		(+ 
+			$from:= ( 'this' ! 
+						$v:= #variable 
+						/IF	NOT LAST #MP $source_list.$v ->
+							#error( $v err17 ); FAIL
+						 FI/ !
+						 #root_name 
+					)
+			/IF $from = this -> 
+				$from:= <. comp: COPY(LAST #MP $this) .>
+			 ELSIF NOT #TREE($from) ->
+				$from:= <. var: $v .>
+			 FI;
+			 $sharing_host !.:= $from/
+		+ #exclusive_union )
+	 
+	   /$sharing_hosts !.:= $sharing_host;
+	    $sharing_host:= NULL/
+	+ ',')
+
+	'SHARE' 'ALL'
+	(+ $Id /$shared_events ++:= <. $Id: T .>/ + ',')
+	
+	/$work:= #IMPLODE( 'ShareAll_' #unique_number() '_' LAST #MP $main_schema_name);
+	 RETURN <.	operation:		SHARE_ALL,
+				work:			$work,
+				host_list:		$sharing_hosts,
+				shared_events:	$shared_events .>/
+##
+
+#exclusive_union
+	'|' '+' '|'
+##
+
+#ensure_op
+	ENSURE /#error( $ err12 ); FAIL/
+##
+
+------------------------------------
+-----	 event attributes    -------
+------------------------------------
+
+#plain_attribute_declaration 
+
+##
+
+#event_attribute_declaration
+
+##
+
+------------------------------------------------------------------------------
+--------- 2nd pass, updates of $composites and $roots
+--------- identifying composite events
+------------------------------------------------------------------------------
+
+-- put composite events into event patterns to distinguish them from plain atoms
+-- check that no recursion happens (by assembling a list of all called composites in depth)
+-- flatten iterations by scope, replacing with alternatives
+-- replace optional with alternative
+-- expand WHEN clauses macro
+-- estimate segment count
+------------------------------------------------------------------------------
+
+#build_rules
+-- returns updated rule tables
+---------------------------------
+
+-- Globals:		
+--	$rule_id
+--  $called_composites: <* $composite_name: T *> -- composite rules called from $rule_id
+--  $inside_when   -- is T when process pattern list in WHEN block
+---------------------------------------------
+
+	<* $rule_id: <. rule_type:	$rule_type,
+					work_name:	$work_name,
+					[build_block: $comp_op_list],
+					pattern_list: $b:= #build_element  
+						/$res++:= <. $rule_id: 
+									<.	rule_type:			$rule_type,
+										work_name:			$work_name,
+										pattern_list:		$b,
+										build_block:		$comp_op_list, 
+										called_composites:	$called_composites 
+									.> 
+								  .>;
+						 $called_composites	:= NULL;
+						 $comp_op_list		:= NULL /
+				.>
+	 *>
+	/RETURN $res/
+##
+
+#build_element
+-- traverses the initial tree, 
+-- marks composite events to distinguish them from atoms
+-- flattening iterations by scope, replacing with alternative
+-- replacing optional with alternative
+-- checking that no recursion happens, ONLY SIMPLE RECURSION IS CHECKED
+--
+-- returns (modified) element
+----------------
+--replaces type for 'composite', instead of "plain"
+	<.	type: plain,
+		name: $Id    .>
+		
+	/IF LAST #build_rules $inside_when AND LAST #MP $triggering_events.$Id  ->
+		#error( $Id err3); FAIL -- trigger event should not appear in pattern list
+	 FI;
+	 
+	 IF LAST #MP $roots.$Id ->
+		#error( $Id err5); FAIL --root event should not appear in rule body
+	 FI;
+	 
+	-- IF $Id = LAST #build_rules $rule_id ->
+	 -- detects simple recursion
+	--	#error( $Id err6); FAIL --event should not appear recursively in rule body
+	-- FI;
+
+	 IF LAST #MP $composites.$Id  ->
+		LAST #build_rules $called_composites ++:= <. $Id: T .>;
+		RETURN <. type: composite,
+				  name: $Id 
+			   .>
+	 FI;
+
+	 LAST #MP $atomic_events ++:= <. $Id: T .>;
+	 RETURN $ /;;
+-------------
+
+	<.	type:	$type:= (sequence ! alternative),
+		name:	$work_name,
+		body:	(. (* $b !.:= #build_element *) .),
+		[probability_list: $probability_list]
+	.> 	
+	/RETURN <.	type:	$type,
+				name:	$work_name,
+				body:	$b,
+				probability_list: $probability_list
+			.>/;;
+
+----------------
+	-- this requires to apply scope limit and transform into alternative pattern
+	<.	type:		$type:= ( (iterator ! iterator_plus) /$new_type:= sequence/ !
+							  (set_iterator ! set_iterator_plus) /$new_type:= set/ ),
+		name:			 $name,
+		body:			 $b:= #build_element,
+		iteration_scope: <. lower_bound: $lower_bound, 
+							upper_bound: $upper_bound .> 
+	.>
+	/ -- create alternatives	for iterations lower .. upper
+	 $this_lower_bound := COPY($lower_bound);
+	 IF $this_lower_bound = 0 -> 
+		$new_body!.:= <. type: empty .>;
+		$this_lower_bound +:=1
+	 FI;
+	 IF  $this_lower_bound = 1 AND $this_lower_bound <= $upper_bound -> 
+		$new_body!.:= $b;
+		$this_lower_bound +:=1
+	 FI;
+	 	
+	 LOOP -- at this point $this_lower_bound > 1
+		$x := COPY($this_lower_bound);
+		-- now to create sequences of >=2 $b instancies
+		IF $x > $upper_bound -> BREAK FI;
+		-- create a sequence of $lower_bound instances of $b
+		$a := NULL;
+		LOOP
+			IF $x = 0 -> BREAK FI;
+			$a!.:= $b;
+			$x +:= -1
+		END;
+		-- if new type = set, no permutation is needed, because all are identical
+
+		$new_body!.:= <. type: $new_type, 
+						 name: #IMPLODE(Ct '_' #unique_number() 
+									'_' LAST #MP $main_schema_name), 
+						 body: $a
+					 .>;
+		$this_lower_bound +:= 1
+	END;
+	
+	IF #LEN($new_body) = 1 ->
+		$new_body := $new_body[1];
+		RETURN $new_body
+	FI;
+	
+	RETURN <.	type: alternative, 
+				name: $name, 
+				body: $new_body .>
+	/;;
+	
+--------------
+	<.	type:	optional,
+		name:	$name,
+		body:	$b:= #build_element
+	.>
+	/RETURN <. type: alternative, 
+			   name:	$name, 
+			   body: (. <. type: empty .> $b .)
+			.>/;;
+	
+--------------
+	<.	type: empty .> /RETURN $/;;
+	
+--------------
+	<.	type:	set,
+		name:	$name,
+		body:	(. (* $b!.:= #build_element *) .)
+	.> 	
+	/IF #LEN($b) = 1 ->
+		RETURN <. type:	set,
+				  name:	$name,
+				  body:	$b
+			   .>
+	ELSIF T ->
+	 -- find all permutations of body elements and assemble an alternative of them
+	 -- in fact, implement interlacing to support shared mapping
+		$permutations:= #find_all_permutations($b);
+		RETURN <.	type: alternative, 
+					name: $name, 
+					body: $permutations .>
+	FI /;;
+--------------
+
+	<.	type:	when_clause /LAST #build_rules $inside_when := T/,
+		body:	$pl,
+		when_units: $wu_list
+	.>
+	/LAST #build_rules $inside_when := NULL;
+	-- transform WHEN pattern by applying CUT macro --<<<<<<<<<<<<<<<<<<<<<
+	RETURN $ --<<<<<<<<<<<<<<<<<<<<
+	/;;
+--------------
+
+	$x	 /PRINT (. '****#build_element*****' build for type $x.type not yet implemented for $x .);
+		  RETURN EMPTY/
+##
+
+#find_all_permutations
+-- find all permutations of shared events in the element_list, make a set for each,
+-- and return the list of sets
+
+	$elt_list
+	/
+	-- get all index permutations
+	$index_perms:= #permutations(#LEN($elt_list));
+	FORALL $indexes IN $index_perms DO
+		$new_list:= NULL;
+		FORALL $ind IN $indexes DO
+			$new_list !.:= $elt_list[$ind]
+		OD;
+		$new_body !.:=	<.	type: set, 
+							name: #IMPLODE( 'Set_' #unique_number() 
+									'_' LAST #MP $main_schema_name), 
+							body: $new_list 
+						.>
+	OD;
+	RETURN $new_body /
+##
+
+#permutations
+-- return list of all permutations for integers 1..n
+	$n
+	/IF $n <= 1 -> RETURN (. (. 1 .) .) FI;
+	 $prev:= #permutations($n - 1);
+	 FORALL $p IN $prev DO
+		$x:= 1;
+		$len:= #LEN($p);
+		-- insert n at place x in p
+		LOOP
+			IF $x > $len -> BREAK FI;
+			$y:= 1;
+			$r:= NULL;
+			FORALL $e IN $p DO
+				IF $y = $x -> $r !.:= $n FI;
+				$r !.:= $e;
+				$y +:= 1
+			OD;
+			$res !.:= $r;
+			$x +:=1
+		END;
+		$item:= NULL; -- unfortunately COPY($p)!.$n does not work!
+		FORALL $z IN $p DO
+			$item !.:= $z
+		OD; 
+		$item !.:= $n;
+		$res !.:= $item;
+	 OD;
+	 RETURN $res /
+##
+
+#detect_recursion
+-- global: $already_called
+
+	<* $event_name: <. [ called_composites: 
+									/$already_called:= NULL/
+									<* $callee: $x 
+							/$already_called ++:= <. $callee: T .>;
+							 IF $event_name = $callee ->
+								#error( $event_name err6 ); FAIL
+							 FI;
+							 
+							 IF LAST #MP $new_composites.$callee.called_composites ->
+								#check_recursive_call_in_depth( LAST #MP $new_composites.$callee )
+							 FI/
+									*> ] 
+					.>
+	*>
+##
+
+#check_recursive_call_in_depth
+	<. called_composites: <* $callee: $x 
+							/IF LAST #detect_recursion $already_called.$callee ->
+								#error( $callee err6 ); FAIL
+							 FI;
+							 LAST #detect_recursion $already_called ++:= <. $callee: T .>;
+							 IF LAST #MP $new_composites.$callee.called_composites ->
+								#check_recursive_call_in_depth( LAST #MP $new_composites.$callee )
+							 FI/
+						   *>
+	.>
+##
+
+#order_composites_by_dependency
+
+	<* $event_name: <. [ called_composites: 
+							<* $callee: $x 
+								/IF LAST #MP $new_composites.$callee.called_composites ->
+									#find_dependencies_in_depth( LAST #MP $new_composites.$callee )
+								FI;
+								IF NOT LAST #MP $already_ordered.$callee ->
+									LAST #MP $already_ordered ++:= <. $callee: T .>;
+									$ordered_list !.:= $callee
+								FI /
+							*> ] 
+					.>
+					-- all callees have been put on the list
+					/IF NOT LAST #MP $already_ordered.$event_name ->
+						LAST #MP $already_ordered ++:= <. $event_name: T .>;
+						$ordered_list !.:= $event_name
+					 FI/ 
+	*>
+	/RETURN $ordered_list/
+##
+
+#find_dependencies_in_depth
+	<. called_composites: 
+							<* $callee: $x 
+								/IF LAST #MP $new_composites.$callee.called_composites ->
+									#find_dependencies_in_depth( LAST #MP $new_composites.$callee )
+								FI;
+								IF NOT LAST #MP $already_ordered.$callee ->
+									LAST #MP $already_ordered ++:= <. $callee: T .>;
+									$ordered_list !.:= $callee
+								FI /
+							*> 
+	.>
+##
+
+#prepare_share_all
+	<* $work:
+			<.	host_list:		$sharing_hosts,
+				shared_events:	/$shared_events:= NULL/
+								<* $event_name: $x
+									/IF LAST #MP $composites.$event_name ->
+										$shared_events ++:= <. $event_name: composite .>
+									 ELSIF LAST #MP $atomic_events.$event_name ->
+										$shared_events ++:= <. $event_name: atomic .>
+									 ELSIF T ->
+										#error( $event_name err18 ); FAIL
+									 FI/
+								*> 
+			.>
+			/$res ++:= <. $work: 
+							<. operation: SHARE_ALL,
+							   host_list: $sharing_hosts,
+							   shared_events:	$shared_events .>
+							.>/
+	*>
+	/RETURN $res/
+##
+	
+------------- auxiliary rules -------------------
+#error
+	$a  /IF LAST #MP $errors_detected > 2 -> FAIL FI;
+		 $line := #CALL_PAS( 4 $a ) DIV 80;
+		 $col  := #CALL_PAS( 4 $a ) MOD 80;
+		 MSG<< '*** error:';
+		 IF $line <> 0 ->
+			MSG<] at $line ':' $col
+		 FI;
+		 LAST #MP $errors_detected +:= 1/
+		 
+	( err1 /MSG<] wrong schema name $a identifier expected/ !
+	  err2 /MSG<] wrong event pattern $a / !
+	  err3 /MSG<] trigger event $a should not appear in WHEN pattern list / !
+	  err4 /MSG<] detected around token $a/ !
+	  err5 /MSG<] root event $a should not appear in rule body/ !
+	  err6 /MSG<] recursion for event $a is detected/ !
+	  err7 /MSG<] syntax error in probability definition detected at $a/ !
+	  err8 /MSG<] schema name $a should be the same as input parameter/ !
+	  err9 /MSG<] keyword 'DO' is expected in COORDINATE when actual token is $a / !
+	  err10 /MSG<] keyword 'OD' is expected in COORDINATE when actual token is $a / !
+	  err11 /MSG<] semicolon is expected when actual token is $a / !
+	  err12 /MSG<] construct at token $a is not yet implemented/ !
+	  err13 /MSG<] ':' is expected when actual token is $a / !
+	  err14 /MSG<] incorrect variable name $a in the COORDINATE source / !
+	  err15 /MSG<] derivation for root $a should be completed before composition/ !
+	  err16 /MSG<] wrong relation name $a in the ADD composition/ !
+	  err17 /MSG<] variable name $a is undefined/ !
+	  err18 /MSG<] shared event $a has not been defined in any grammar rule / !
+	  err19 /MSG<] variable name $a has been defined twice/ !
+
+	  $any /MSG<< at token $a/ 
+	)
+##
+--------------------------------------------------
+#unique_number
+	/LAST #MP $unique_number +:=1;
+	RETURN COPY(LAST #MP $unique_number)/
+##	
+
+
