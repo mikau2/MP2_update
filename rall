@@ -1,14 +1,28 @@
 #!/bin/csh -f
 # $1 - schema name, $2 - scope
-set rig='~/rigal/rigsc.446/bin'
-$rig/rc MP2-parser
-$rig/ic MP2-parser -d $1 tree $2> temp.txt
-$rig/rc MP2-generator
-$rig/ic MP2-generator -d tree> temp2.txt
-rm tree *.rsc
-echo "C++ compiler: g++ $1.cpp -o $1 -fast"
-time /Developer/usr/bin/g++ "$1.cpp" -o $1 -fast
-echo "$1 run: ./$1>$1.txt"
-time ./$1>"$1.txt"
+if !($?rig) set rig='~/rigal/rigsc.446/bin'
+
+# ensure MP2 binaries have been built
+test -x MP2-parser     ||  $rig/rc MP2-parser -c
+test -x MP2-generator  ||  $rig/rc MP2-generator -c
+# cleanup rc/ic
+rm *.rsc
+
+# parse into tree
+./MP2-parser "$1" tree "$2" > temp.txt
+
+# generate C++ code
+./MP2-generator tree > temp2.txt
+
+# compile C++
+echo "C++ compiler: g++ $1.cpp -o $1 -Ofast"
+time g++ "$1.cpp" -o $1 -Ofast
+
+# run C++
+echo "$1 run: ./$1 > $1.txt"
+time ./$1 > "$1.txt"
+
 echo "Completed $1 for scope $2"
-rm $1 xd RIGCOMP.TMP 
+
+# cleanup
+rm temp.txt temp2.txt $1 tree
