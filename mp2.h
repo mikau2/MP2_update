@@ -5,7 +5,7 @@
  *  recursive descent trace generation
  *	common declarations and globals
  *
- *	last update: 03/26/15
+ *	last modified: 03/26/15
  */
 #include <iostream>
 #include <fstream>
