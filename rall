@@ -1,7 +1,7 @@
 #!/bin/csh -f
 # $1 - schema name, $2 - scope
-if !($?rig) set rig='~/rigal/rigsc.446/bin'
 if !($?mp) set mp=`dirname $0`
+if !($?rig) set rig='~/rigal/rigsc.446/bin'
 
 # ensure MP2 binaries have been built
 if !(-x $mp/MP2-parser) $rig/rc MP2-parser -c
