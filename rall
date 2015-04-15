@@ -10,13 +10,26 @@ rm *.rsc
 
 # parse into tree
 ./MP2-parser "$1" tree "$2" > temp.txt
+if !(-f tree) then
+	echo "ERROR: Unable to parse into syntax tree file (see 'temp.txt' for details)"
+	exit 1
+endif
 
 # generate C++ code
 ./MP2-generator tree > temp2.txt
+if !(-f "$1.cpp") then
+	echo "ERROR: Unable to generate '$1.cpp' C++ source code file (see 'temp2.txt' or 'RIGSC/bin/v tree' for details)"
+	rm .cpp >& /dev/null # weird bug in MP2-generator
+	exit 2
+endif
 
 # compile C++
 echo "C++ compiler: g++ $1.cpp -o $1 -Ofast"
 time g++ "$1.cpp" -o $1 -Ofast
+if !(-x "$1") then
+	echo "ERROR: Unable to compile binary file"
+	exit 3
+endif
 
 # run C++
 echo "$1 run: ./$1 > $1.txt"
