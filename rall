@@ -6,7 +6,7 @@ if !($?rig) set rig='~/rigal/rigsc.446/bin'
 test -x MP2-parser     ||  $rig/rc MP2-parser -c
 test -x MP2-generator  ||  $rig/rc MP2-generator -c
 # cleanup rc/ic
-rm *.rsc
+rm *.rsc  >& /dev/null
 
 # parse into tree
 ./MP2-parser "$1" tree "$2" > temp.txt
@@ -38,4 +38,4 @@ time ./$1 > "$1.txt"
 echo "Completed $1 for scope $2"
 
 # cleanup
-rm temp.txt temp2.txt $1 tree
+rm temp.txt temp2.txt $1 tree  >& /dev/null
