@@ -1,22 +1,23 @@
 #!/bin/csh -f
 # $1 - schema name, $2 - scope
 if !($?rig) set rig='~/rigal/rigsc.446/bin'
+if !($?mp) set mp=`dirname $0`
 
 # ensure MP2 binaries have been built
-if !(-x MP2-parser) $rig/rc MP2-parser -c
-if !(-x MP2-generator) $rig/rc MP2-generator -c
+if !(-x $mp/MP2-parser) $rig/rc MP2-parser -c
+if !(-x $mp/MP2-generator) $rig/rc MP2-generator -c
 # cleanup rc/ic
 rm *.rsc  >& /dev/null
 
 # parse into tree
-./MP2-parser "$1" tree "$2" > temp.txt
+$mp/MP2-parser "$1" tree "$2" > temp.txt
 if !(-f tree) then
 	echo "ERROR: Unable to parse into syntax tree file (see 'temp.txt' for details)"
 	exit 1
 endif
 
 # generate C++ code
-./MP2-generator tree > temp2.txt
+$mp/MP2-generator tree > temp2.txt
 if !(-f "$1.cpp") then
 	echo "ERROR: Unable to generate '$1.cpp' C++ source code file (see 'temp2.txt' or 'RIGSC/bin/v tree' for details)"
 	rm .cpp >& /dev/null # weird bug in MP2-generator
@@ -25,7 +26,7 @@ endif
 
 # compile C++
 echo "C++ compiler: g++ $1.cpp -o $1 -Ofast"
-time g++ "$1.cpp" -o $1 -Ofast
+time g++ "$1.cpp" -o $1 -I$mp -Ofast
 if !(-x "$1") then
 	echo "ERROR: Unable to compile binary file"
 	exit 3
