@@ -3,8 +3,8 @@
 if !($?rig) set rig='~/rigal/rigsc.446/bin'
 
 # ensure MP2 binaries have been built
-test -x MP2-parser     ||  $rig/rc MP2-parser -c
-test -x MP2-generator  ||  $rig/rc MP2-generator -c
+if !(-x MP2-parser) $rig/rc MP2-parser -c
+if !(-x MP2-generator) $rig/rc MP2-generator -c
 # cleanup rc/ic
 rm *.rsc  >& /dev/null
 
